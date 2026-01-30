@@ -2,111 +2,12 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"net/http"
 	"os"
+	"sync/atomic"
 	"time"
 )
-
-type pieceRange struct {
-	start,length int64
-};
-
-type OffsetWrite struct {
-	file *os.File
-	offset int64
-}
-func (ofw *OffsetWrite) Write(p []byte) (n int, err error) {
-	n, err = ofw.file.WriteAt(p,ofw.offset)
-	ofw.offset+=int64(n)
-	return n, err
-}
-type status struct {
-	pieceRange
-	successful bool
-}
-func getFileSize(url string) (int64, error) {
-    resp, err := http.Head(url)
-    if err != nil {
-        return 0, err
-    }
-    defer resp.Body.Close()
-    if resp.StatusCode != http.StatusOK {
-        return 0, fmt.Errorf("server returned status: %s", resp.Status)
-    }
-	fmt.Println(resp)
-    return resp.ContentLength, nil
-}
-func SupportsRanges(url string) (bool, error) {
-    resp, err := http.Head(url)
-    if err != nil {
-        return false, err
-    }
-    defer resp.Body.Close()
-    if resp.StatusCode != http.StatusOK {
-        return false, fmt.Errorf("server returned status: %s", resp.Status)
-    }
-	if resp.Header.Get("Accept-Ranges") == "bytes" {
-		return true, nil
-	}
-	return false, nil
-}
-func fetch(url string,file *os.File) (err error) {
-	resp, err := http.Get(url)
-	if err != nil {	
-		return err
-	}
-	defer resp.Body.Close()
-	writer := io.Writer(file)
-	buffer := make([]byte, 1024*1024*4)
-	_, err = io.CopyBuffer(writer,resp.Body,buffer)
-	if err!=nil {
-		return err
-	}
-	return nil
-}
-var customClient *http.Client
-func fetchPiece(url string,pr pieceRange,file *os.File,done chan status) {
-	req, err := http.NewRequest("GET",url,nil)
-	if err != nil {
-		done <- status{
-			pieceRange: pr,
-			successful: false,
-		}
-		return
-	}
-	req.Header.Add("Range",fmt.Sprintf("bytes=%d-%d",pr.start,pr.length+pr.start-1))
-	resp, err := customClient.Do(req)
-	if err != nil {	
-		done <- status{
-			pieceRange: pr,
-			successful: false,
-		}
-		return
-	}
-	if resp.StatusCode != http.StatusPartialContent {
-		done <- status{
-			pieceRange: pr,
-			successful: false,
-		}
-		return
-	}
-	defer resp.Body.Close()
-	writer := &OffsetWrite{file: file,offset: pr.start}
-	_, err = io.Copy(writer,resp.Body)
-	if err!=nil {	
-		done <- status{
-			pieceRange: pr,
-			successful: false,
-		}
-		return
-	}
-	done <- status{
-		pieceRange: pr,
-		successful: true,
-	}
-}
-const threads int64 = 64
+const threads int64 = 8
 func main() {
 	args := os.Args
 	customClient = &http.Client{
@@ -156,20 +57,172 @@ func main() {
 			fmt.Println("couldn't create file")
 			return
 		}
+		var total_downloaded int64 = 0
+		monitor := func(num int64) {
+			total_downloaded+=num
+		}
 		for i := range threads-1 {
-			go fetchPiece(args[1],pieceRange{start: pieceLen*int64(i), length: pieceLen},file,ch)
+			go fetchPiece(args[1],pieceRange{start: pieceLen*int64(i), length: pieceLen},file,ch,monitor)
 		}
-		go fetchPiece(args[1],pieceRange{start: pieceLen*int64(threads-1), length: size-int64(threads-1)*pieceLen},file,ch)
-		successful := 0
-		for successful<int(threads) {
-			st := <-ch
-			if st.successful {
-				successful++
-				fmt.Println("thread finished.")
-			} else {
-				go fetchPiece(args[1],st.pieceRange,file,ch)
+		go fetchPiece(args[1],pieceRange{start: pieceLen*int64(threads-1), length: size-int64(threads-1)*pieceLen},file,ch,monitor)
+
+		go func() {
+			successful := int64(0)
+			for successful<threads {
+				st := <-ch
+				if st.successful {
+					successful++
+				} else {
+					go fetchPiece(args[1],st.pieceRange,file,ch,monitor)
+				}
 			}
+		}()
+
+		
+
+
+
+
+
+
+
+
+
+
+		// current_threads := int64(0)
+		// launched_threads := int64(0)
+		// one_piece := int64(64*1024*1024)
+		// total_threads := size/int64(one_piece)
+		// successful_threads := make(chan bool,threads)
+		// go func() {
+		// 	successful := int64(0)
+		// 	for successful<total_threads {
+		// 		st := <-ch
+		// 		if st.successful {
+		// 			successful++
+		// 			atomic.AddInt64(&current_threads,-1)
+		// 			successful_threads<-true
+		// 		} else {
+		// 			go fetchPiece(args[1],st.pieceRange,file,ch,monitor)
+		// 		}
+		// 	}
+		// }()
+		// go func() {
+		// 	for launched_threads<total_threads {
+		// 		for atomic.LoadInt64(&current_threads)<threads && launched_threads<total_threads {
+		// 			pieceLen := one_piece
+		// 			if launched_threads+1==total_threads {
+		// 				// pieceLen = min(one_piece,int(size-(total_threads-1)*(int64(one_piece))))
+		// 				pieceLen += size%one_piece
+		// 			}
+		// 			go fetchPiece(args[1],pieceRange{start: one_piece*launched_threads, length: pieceLen},file,ch,monitor)
+		// 			atomic.AddInt64(&current_threads,1);
+		// 			launched_threads++
+		// 		}
+		// 		<-successful_threads
+		// 	}
+		// }()
+
+
+
+
+		startTime := time.Now()
+		lastDownloadedSnapshot := atomic.LoadInt64(&total_downloaded)
+		lastSnapshotTime := time.Now()
+		
+		for {
+		    currentDownloaded := atomic.LoadInt64(&total_downloaded)
+		    if currentDownloaded >= size {
+		        progressBar(100, 50)
+		        break
+		    }
+		
+		    now := time.Now()
+		    elapsed := now.Sub(startTime)
+		    snapshotDuration := now.Sub(lastSnapshotTime)
+		    
+		    // 1. Calculate Average Speed & ETC
+		    avgSpeed := float64(currentDownloaded) / elapsed.Seconds()
+		    var etc time.Duration
+		    if currentDownloaded > 0 {
+		        remainingBytes := size - currentDownloaded
+		        etc = time.Duration(float64(remainingBytes)/avgSpeed) * time.Second
+		    }
+		
+		    // 2. Calculate Current Instantaneous Speed
+		    // Bytes divided by seconds (float64)
+		    bytesSinceLast := currentDownloaded - lastDownloadedSnapshot
+		    instSpeed := float64(bytesSinceLast) / snapshotDuration.Seconds()
+		
+		    // 3. Format Units (Bytes -> KB -> MB -> GB)
+		    units := []string{"B/s", "KB/s", "MB/s", "GB/s"}
+		    unitIdx := 0
+		    displaySpeed := instSpeed
+		    for displaySpeed >= 1024 && unitIdx < len(units)-1 {
+		        displaySpeed /= 1024
+		        unitIdx++
+		    }
+		
+		    // 4. Update Snapshots
+		    lastDownloadedSnapshot = currentDownloaded
+		    lastSnapshotTime = now
+		
+		    // 5. Print Output
+		    progressBar(int(100*currentDownloaded/size), 50)
+		    fmt.Printf(" | Elapsed: %s | ETC: %s | Speed: %.2f %s           ",
+		        elapsed.Round(time.Second),
+		        etc.Round(time.Second),
+		        displaySpeed,
+		        units[unitIdx],
+		    )
+		
+		    time.Sleep(500 * time.Millisecond)
 		}
-		fmt.Println("file downloaded")
+		// progress bar
+		// startTime := time.Now()
+		// last_downloaded_snapshot := total_downloaded
+		// last_snapshot_time := time.Now()
+		// for {
+		//     currentDownloaded := total_downloaded
+		//     if currentDownloaded >= size {
+		//         progressBar(100, 50)
+		//         break
+		//     }
+		//     elapsed := time.Since(startTime)
+		//     percent := int(100 * currentDownloaded / size)
+		//     avgSpeed := float64(currentDownloaded) / elapsed.Seconds()
+		//     var etc time.Duration
+		//     if currentDownloaded > 0 {
+		//         remainingBytes := size - currentDownloaded
+		//         etcSeconds := float64(remainingBytes) / avgSpeed
+		//         etc = time.Duration(etcSeconds) * time.Second
+		//     }
+		//     progressBar(percent, 50)
+		// 	char := " "
+		// 	var downloaded float32 = float32(total_downloaded-last_downloaded_snapshot)/float32(time.Since(last_snapshot_time))
+		// 	last_downloaded_snapshot = total_downloaded
+		// 	last_snapshot_time = time.Now()
+		// 	if downloaded>1000. {
+		// 		downloaded/=1000.
+		// 		if char == "M" {
+		// 			char = "G";
+		// 		}
+		// 		if char == "K" {
+		// 			char = "M";
+		// 		}
+		// 		if char == " " {
+		// 			char = "K"
+		// 		}
+		// 	}
+		// 	fmt.Printf(" | Elapsed: %s | ETC: %s | Speed: %f %sbps      ", 
+		//         elapsed.Round(time.Second), 
+		//         etc.Round(time.Second),
+		// 		downloaded,
+		// 		char,
+		//     )
+		//     time.Sleep(500 * time.Millisecond)
+		// }
+		// fmt.Println("")
+		// fmt.Println("file downloaded")
 	}
 }
