@@ -1,4 +1,4 @@
-package dman
+package download
 
 import (
 	"fmt"

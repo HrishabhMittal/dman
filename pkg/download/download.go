@@ -1,10 +1,12 @@
-package dman
+package download
 
 import (
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
+	"path"
 	"sync/atomic"
 )
 
@@ -43,6 +45,45 @@ func NewDownloader(url, filePath string, concurrency int) *Downloader {
 	}
 }
 
+func NewInferDownloader(url string,concurrency int) *Downloader {
+	return &Downloader{
+		URL:         url,
+		FilePath:    "",
+		Concurrency: concurrency,
+		Client: &http.Client{
+			Transport: &http.Transport{
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 100,
+			},
+		},
+	}
+}
+
+func (d *Downloader) getFilename(resp *http.Response) string {
+	cd := resp.Header.Get("Content-Disposition")
+	if cd != "" {
+		_, params, err := mime.ParseMediaType(cd)
+		if err == nil {
+			if filename, ok := params["filename"]; ok {
+				return filename
+			}
+		}
+	}
+	filename := path.Base(resp.Request.URL.Path)
+	if filename == "." || filename == "/" {
+		return "downloaded_file"
+	}
+	return filename
+}
+
+func isDirectory(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.IsDir()
+}
+
 func (d *Downloader) Prepare() error {
 	resp, err := d.Client.Head(d.URL)
 	if err != nil {
@@ -56,7 +97,16 @@ func (d *Downloader) Prepare() error {
 
 	d.TotalSize = resp.ContentLength
 	d.SupportsRange = resp.Header.Get("Accept-Ranges") == "bytes"
-
+	
+	if d.FilePath == "" || isDirectory(d.FilePath) {
+		extractedName := d.getFilename(resp)
+		if isDirectory(d.FilePath) {
+			d.FilePath = path.Join(d.FilePath, extractedName)
+		} else {
+			d.FilePath = extractedName
+		}
+	}
+	
 	f, err := os.Create(d.FilePath)
 	if err != nil {
 		return err
