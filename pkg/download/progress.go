@@ -3,11 +3,35 @@ package download
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
 type ProgressManager struct {
+	Current *int64
 	TotalSize int64
+}
+
+func (pm *ProgressManager) DisplayDownloadProgress(end chan struct{}) {
+	startTime := time.Now()
+	lastSnapTime := time.Now()
+	lastSnapSize := int64(0)
+	for {
+		current := atomic.LoadInt64(pm.Current)
+		if current >= pm.TotalSize {
+			pm.Print(pm.TotalSize, time.Since(startTime), 0)
+			fmt.Println("\nDownload Complete!")
+			break
+		}
+		now := time.Now()
+		duration := now.Sub(lastSnapTime)
+		instSpeed := float64(current-lastSnapSize) / duration.Seconds()
+		pm.Print(current, time.Since(startTime), instSpeed)
+		lastSnapTime = now
+		lastSnapSize = current
+		time.Sleep(500 * time.Millisecond)
+	}
+	end<-struct{}{}
 }
 
 func (pm *ProgressManager) Print(current int64, elapsed time.Duration, instSpeed float64) {

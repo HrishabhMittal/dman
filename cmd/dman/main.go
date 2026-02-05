@@ -1,26 +1,26 @@
 package main
 
 import (
-	"fmt"
-	"sync/atomic"
 	"flag"
-	"time"
+	"fmt"
 	"github.com/HrishabhMittal/dman/pkg/download"
 	"github.com/HrishabhMittal/gotorrent/pkg/torrent"
 )
 
+
 func main() {
 	torrentFile := flag.String("file","","path to torrent file")
 	downloadLink := flag.String("link","","link to download")
-	outputFile := flag.String("output","","file output path")
+	numConcurrentDown := flag.Int("num",16,"number of concurrent downloads")
+	outputFile := flag.String("output","","file output path (for downloads)")
 	flag.Parse()
 
 	if *torrentFile=="" {
 		var dl *download.Downloader
 		if *outputFile=="" {
-			dl = download.NewInferDownloader(*downloadLink,8)
+			dl = download.NewInferDownloader(*downloadLink,*numConcurrentDown)
 		} else {
-			dl = download.NewDownloader(*downloadLink,*outputFile,8)
+			dl = download.NewDownloader(*downloadLink,*outputFile,*numConcurrentDown)
 		}
 		fmt.Println("Initializing...")
 		if err := dl.Prepare(); err != nil {
@@ -29,36 +29,28 @@ func main() {
 		}
 		fmt.Printf("File Size: %d | Multi-threaded: %v\n", dl.TotalSize, dl.SupportsRange)
 		go dl.Start()
-		pm := &download.ProgressManager{TotalSize: dl.TotalSize}
-		startTime := time.Now()
-		lastSnapTime := time.Now()
-		lastSnapSize := int64(0)
-		for {
-			current := atomic.LoadInt64(&dl.Downloaded)
-			if current >= dl.TotalSize {
-				pm.Print(dl.TotalSize, time.Since(startTime), 0)
-				fmt.Println("\nDownload Complete!")
-				break
-			}
-			now := time.Now()
-			duration := now.Sub(lastSnapTime)
-			instSpeed := float64(current-lastSnapSize) / duration.Seconds()
-			pm.Print(current, time.Since(startTime), instSpeed)
-			lastSnapTime = now
-			lastSnapSize = current
-			time.Sleep(500 * time.Millisecond)
-		}
+		pm := &download.ProgressManager{TotalSize: dl.TotalSize,Current: &dl.Downloaded}
+		end := make(chan struct{})
+		go pm.DisplayDownloadProgress(end)
+		<-end
 	} else if *downloadLink=="" {
 		tf, err := torrent.NewTorrentFile(*torrentFile)
 		fmt.Printf("Downloading: %s\n", tf.Name)
-
 		dn,err := torrent.NewDownloader(tf)
 		if err != nil {
 			fmt.Println("couldnt start download:", err)
 			return
 		}
 
+		// for now
+		dn.PrintLogs()
+
+
+		// pm := &download.ProgressManager{TotalSize: &dl.TotalSize,Current: &dl.Downloaded}
+		// end := make(chan struct{})
+		// go pm.DisplayDownloadProgress(end)
 		dn.Wait()
+		// <-end
 		fmt.Println("Exiting...")
 		err = torrent.Verify(tf)
 		if err != nil {
